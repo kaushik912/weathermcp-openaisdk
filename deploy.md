@@ -15,7 +15,7 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
 ## Deploy
 
 ```bash
-cd ai-mcp-lab/weathermcp
+cd weathermcp-openaisdk
 gcloud run deploy weathermcp \
   --source . \
   --region us-central1 \
@@ -30,12 +30,12 @@ gcloud run deploy weathermcp \
 | `--max-instances 1` | Caps hosting cost even under bot traffic |
 | `--memory 512Mi` | Three small Python processes fit comfortably |
 
-No env vars needed. Optional: `--set-env-vars MODEL=openrouter/<model>` (must support tool calling).
+No env vars needed. Optional: `--set-env-vars MODEL=<openrouter-model-id>` (must support tool calling).
 
 ## BYOK behaviour
 
 - UI sends the key in the `X-OpenRouter-Key` header; it lives in page memory only.
-- Server passes it to LiteLLM per request; never stored or logged. Missing → 401, invalid → 401 "invalid OpenRouter API key".
+- Server creates an OpenAI SDK client (base URL = OpenRouter) with it for that request only; never stored or logged. Missing → 401, invalid → 401 "invalid OpenRouter API key".
 - Each question costs at most 5 LLM calls (`max_steps=4` + final answer); messages capped at 500 chars.
 
 ## Operate

@@ -14,7 +14,7 @@ Here's a clean narrative you can walk someone through.
 
 | Piece | Role | Why |
 |---|---|---|
-| **LiteLLM** | The model layer | One unified interface to ~100 LLM providers. Swapping Claude → a local Ollama model → OpenRouter is a **one-line change**. No vendor lock-in. |
+| **OpenAI SDK** (any OpenAI-compatible endpoint) | The model layer | The de-facto standard LLM API. Pointed at **OpenRouter** it reaches hundreds of models (Claude, GPT, DeepSeek, Llama…); pointed at **Ollama** it runs a free local model. Swapping is a **one-line config change** (`LLM_BASE_URL` / `MODEL`). Small dependency, fast cold starts. |
 | **MCP** (Model Context Protocol) | The tool layer | An open standard for exposing tools to an LLM. Each tool lives in its own small **MCP server**, independent of the app. |
 | **FastAPI** | The web layer | Serves the browser UI and a `/chat` endpoint that runs the agent. |
 
@@ -24,7 +24,7 @@ Browser ("how's the weather?")
    │
    ▼
 FastAPI /chat ──▶ Agent loop
-                    │  1. asks the LLM (via LiteLLM)
+                    │  1. asks the LLM (OpenAI SDK → OpenRouter)
                     │  2. LLM decides: "call get_weather(city='SF')"
                     │  3. agent runs the tool on its MCP server
                     │  4. feeds the result back to the LLM
@@ -41,16 +41,18 @@ That reason → act → observe → repeat cycle *is* the agent.
 - **The agent loop is defensive.** Cheaper/smaller models tend to over-call tools and never stop. So the loop has a step budget, detects repeated calls, and forces a final text answer — robustness that doesn't depend on the model being smart.
 - **Config lives outside the code.** Which AI model, which tool servers — all externalized (env vars + a `mcp_config.json`), so nothing is a hardcoded string in the app.
 
-**5. Ready to grow up.** It runs locally now but is already **Dockerized** (each MCP server + the agent as separate containers), so it maps straight onto the eventual goal: an internal portal where anyone in the company can use the LLM + tools through a browser, instead of everyone running a tool on their own laptop.
+**5. Ready to grow up.** It's **live on Cloud Run** as a single container (both MCP servers + the agent), and `docker compose` runs each piece as its own service — so it maps straight onto the eventual goal: an internal portal where anyone in the company can use the LLM + tools through a browser, instead of everyone running a tool on their own laptop.
+
+**6. Costs nothing to host.** Visitors **bring their own OpenRouter key**: it stays in their browser tab, is sent per request, and is never stored or logged by the server. The service scales to zero and is capped at one instance, so there's no LLM bill and no runaway hosting bill.
 
 ## The 30-second version (if someone's in a hurry)
 
-> "It's a browser-based AI assistant that can call live tools. I used **MCP** so each tool is a plug-in the agent auto-discovers, and **LiteLLM** so we're not locked to one AI vendor — I can point it at Claude or a free local model with one setting. It's Dockerized and structured so new tools are just config, not code — which is exactly what we'd need to turn it into a shared internal portal."
+> "It's a browser-based AI assistant that can call live tools. I used **MCP** so each tool is a plug-in the agent auto-discovers, and the **OpenAI-compatible API** so we're not locked to one AI vendor — via OpenRouter I can point it at Claude, GPT or DeepSeek, or at a free local model, with one setting. It's Dockerized and structured so new tools are just config, not code — which is exactly what we'd need to turn it into a shared internal portal."
 
 ## The three names to drop, and why they matter
 
 - **MCP** → *tools as pluggable, auto-discovered services* (the "USB-C for AI tools").
-- **LiteLLM** → *no vendor lock-in; swap models freely, add cost controls later*.
+- **OpenAI-compatible API (via OpenRouter)** → *no vendor lock-in; swap models freely with a small, standard SDK*.
 - **Agent loop** → *the LLM doesn't just answer, it reasons and acts using those tools*.
 
 ---

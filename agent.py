@@ -1,9 +1,11 @@
 """
-Provider-agnostic LiteLLM agent + web UI, with MULTI-server MCP discovery.
+Provider-agnostic agent (OpenAI SDK + any OpenAI-compatible endpoint) + web UI,
+with MULTI-server MCP discovery.
 
 Flow:
-  browser -> POST /chat -> agent loop -> LiteLLM (any model) + tools from
-  every configured MCP server (weather @8001, quotes @8002, ...)
+  browser -> POST /chat -> agent loop -> OpenAI-compatible API (OpenRouter by
+  default; Ollama/OpenAI/... via LLM_BASE_URL) + tools from every configured
+  MCP server (weather @8001, quotes @8002, ...)
 
 The frontend lives in ./static (index.html, styles.css, app.js) and is served
 by FastAPI's StaticFiles -- keeping UI out of this backend module.
@@ -17,7 +19,8 @@ import json
 import contextlib
 from pathlib import Path
 
-import litellm
+import openai
+from openai import AsyncOpenAI
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,13 +28,15 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 # ---- config (all swappable via env -> no vendor lock-in) --------------------
-# BYOK: the visitor's OpenRouter key arrives per request in the X-OpenRouter-Key
-# header and is passed straight to LiteLLM. It is never stored or logged.
-MODEL = os.getenv("MODEL", "openrouter/~deepseek/deepseek-v4-flash-latest")
-# e.g. MODEL="ollama/llama3.1"  or  "openrouter/meta-llama/llama-3.1-8b-instruct"
+# Any OpenAI-compatible endpoint works: OpenRouter (default, hundreds of models),
+# Ollama (http://localhost:11434/v1), OpenAI, vLLM, ...
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+MODEL = os.getenv("MODEL", "~deepseek/deepseek-v4-flash-latest")
+# e.g. LLM_BASE_URL=http://localhost:11434/v1 MODEL=llama3.1  (local, no key)
+# BYOK: when the endpoint is OpenRouter, the visitor's key arrives per request in
+# the X-OpenRouter-Key header and is used for that request only. Never stored or logged.
+KEY_REQUIRED = "openrouter.ai" in LLM_BASE_URL
 MAX_MESSAGE_CHARS = 500
-
-litellm.suppress_debug_info = True  # keep provider debug dumps out of logs/errors
 
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
@@ -106,6 +111,13 @@ async def run_agent(user_msg: str, api_key: str | None, max_steps: int = 4):
     seen: dict[str, str] = {}  # cache tool results; also used to detect loops
 
     async with contextlib.AsyncExitStack() as stack:
+        # One client per request, carrying this caller's key; closed with the stack.
+        client = await stack.enter_async_context(AsyncOpenAI(
+            base_url=LLM_BASE_URL,
+            api_key=api_key or "not-needed",  # local endpoints (e.g. Ollama) ignore it
+            max_retries=1,
+            timeout=60,
+        ))
         tools, registry = await connect_all(stack)
 
         messages = [
@@ -114,12 +126,13 @@ async def run_agent(user_msg: str, api_key: str | None, max_steps: int = 4):
         ]
 
         for _ in range(max_steps):
-            resp = await litellm.acompletion(
-                model=MODEL, messages=messages, api_key=api_key,
+            resp = await client.chat.completions.create(
+                model=MODEL, messages=messages,
                 tools=tools, tool_choice="auto",
             )
             msg = resp.choices[0].message
-            messages.append(msg.model_dump())
+            # exclude_none: don't echo back null fields (audio, refusal, ...) some providers reject
+            messages.append(msg.model_dump(exclude_none=True))
 
             if not msg.tool_calls:              # no tool -> final answer
                 return msg.content, steps
@@ -161,7 +174,7 @@ async def run_agent(user_msg: str, api_key: str | None, max_steps: int = 4):
         messages.append({"role": "user", "content":
             "Using the information above, answer my original question now "
             "in plain text. Do not call any tools."})
-        resp = await litellm.acompletion(model=MODEL, messages=messages, api_key=api_key)
+        resp = await client.chat.completions.create(model=MODEL, messages=messages)
         return resp.choices[0].message.content or "(no answer produced)", steps
 
 
@@ -189,11 +202,11 @@ def _public_error(e: BaseException, api_key: str | None) -> tuple[int, str]:
     """Map failures to a safe message: known LLM errors get a friendly text; anything
     else gets the readable cause, with the caller's key scrubbed just in case."""
     leaf = _first_leaf(e)
-    if isinstance(leaf, litellm.AuthenticationError):
+    if isinstance(leaf, openai.AuthenticationError):
         return 401, "invalid OpenRouter API key"
-    if isinstance(leaf, litellm.RateLimitError):
+    if isinstance(leaf, openai.RateLimitError):
         return 429, "rate limited by the model provider (check your OpenRouter credits/limits)"
-    if isinstance(leaf, litellm.APIError):
+    if isinstance(leaf, openai.APIError):  # other HTTP errors, timeouts, connection failures
         return 502, "the model provider returned an error, try again"
     text = " | ".join(_leaf_errors(e))
     if api_key:
@@ -204,7 +217,7 @@ def _public_error(e: BaseException, api_key: str | None) -> tuple[int, str]:
 @app.post("/chat")
 async def chat(req: Request):
     api_key = (req.headers.get("x-openrouter-key") or "").strip()
-    if not api_key and MODEL.startswith("openrouter/"):
+    if not api_key and KEY_REQUIRED:
         return _error(401, "X-OpenRouter-Key header is required (bring your own OpenRouter key)")
 
     body = await req.json()
